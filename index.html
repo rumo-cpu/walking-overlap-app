@@ -12,8 +12,7 @@
     #map { width: 100%; height: 100%; }
     h1 { font-size: 16px; margin: 0 0 8px; }
     .row { display: grid; grid-template-columns: 1fr 88px 28px; gap: 6px; margin-bottom: 8px; }
-    input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
-    input[type="number"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+    input[type="text"], input[type="number"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
     button { padding: 8px 10px; border: 1px solid #ccc; background: #fafafa; border-radius: 6px; cursor: pointer; }
     button.primary { background: #111; color: #fff; border-color: #111; }
     .muted { color: #666; font-size: 12px; }
@@ -32,12 +31,15 @@
     .help { font-size: 12px; color: #555; }
     .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#f1f1f1; border-radius:4px; padding:0 4px; }
   </style>
+  <!-- 任意：最低限のCSP（外部CDNを使うのでscript-srcに 'unsafe-inline' は付けない） -->
+  <!-- <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://maps.geoapify.com https://demotiles.maplibre.org; connect-src 'self' https://api.openrouteservice.org https://maps.geoapify.com https://demotiles.maplibre.org; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; frame-ancestors 'none'"> -->
 </head>
 <body>
 <div id="app">
   <div id="panel">
     <h1>徒歩◯分の重ね合わせ</h1>
     <div class="muted">住所を最大10件、徒歩分数（1–30分）を入れて「追加」。重なりエリアを自動で計算するよ。</div>
+
     <div style="margin:10px 0;">
       <label class="small">ORS APIキー</label>
       <input id="orsKey" type="text" placeholder="OpenRouteService API key（必須）" />
@@ -46,6 +48,7 @@
       <label class="small">Geoapify タイル APIキー（任意・あると地図が綺麗）</label>
       <input id="geoKey" type="text" placeholder="Geoapify API key（任意）" />
     </div>
+
     <div class="row-head"><div>住所</div><div>徒歩(分)</div><div></div></div>
     <div class="row">
       <input id="addr" type="text" placeholder="例）仙台市若林区荒井◯-◯  や  〇〇小学校" />
@@ -61,10 +64,12 @@
       <button id="clearAll">クリア</button>
       <button id="exportGeoJSON">交差GeoJSON書き出し</button>
     </div>
+
     <div class="list" id="points"></div>
+
     <div class="foot help">
-      <div><span class="badge">ヒント</span>住所や施設名を入れて右の「＋」。右上のズーム/回転で調整可。</div>
-      <div style="margin-top:6px;"><span class="badge">注意</span>APIキーはブラウザのローカル保存。公開用途では鍵の扱いに注意して。</div>
+      <div><span class="badge">ヒント</span>住所の後ろに施設名でもOK。右上のズーム/回転で調整可。</div>
+      <div style="margin-top:6px;"><span class="badge">注意</span>APIキーは<b>sessionStorage</b>（タブを閉じると消える）に保存。</div>
       <div style="margin-top:6px;"><span class="badge">規約</span>徒歩表示の換算は <span class="kbd">80m/分</span> を使用。</div>
     </div>
     <div id="status" class="muted" style="margin-top:8px;"></div>
@@ -77,20 +82,24 @@
 <script>
 (function(){
   const $ = (sel) => document.querySelector(sel);
-  const status = (msg, cls='muted') => { const el = $("#status"); el.className = cls; el.textContent = msg; }
+  const status = (msg, cls='muted') => { const el = $("#status"); el.className = cls; el.textContent = msg; };
 
   const orsKeyInput = $("#orsKey");
   const geoKeyInput = $("#geoKey");
-  orsKeyInput.value = localStorage.getItem('orsKey') || '';
-  geoKeyInput.value = localStorage.getItem('geoKey') || '';
-  orsKeyInput.addEventListener('change', ()=>localStorage.setItem('orsKey', orsKeyInput.value));
-  geoKeyInput.addEventListener('change', ()=>localStorage.setItem('geoKey', geoKeyInput.value));
+
+  // ★ ここを sessionStorage で統一（タブ閉じで消える）
+  orsKeyInput.value = sessionStorage.getItem('orsKey') || '';
+  geoKeyInput.value = sessionStorage.getItem('geoKey') || '';
+  orsKeyInput.addEventListener('change', ()=>sessionStorage.setItem('orsKey', orsKeyInput.value));
+  geoKeyInput.addEventListener('change', ()=>sessionStorage.setItem('geoKey', geoKeyInput.value));
+
+  const styleUrl = geoKeyInput.value
+    ? `https://maps.geoapify.com/v1/styles/osm-carto/style.json?apiKey=${encodeURIComponent(geoKeyInput.value)}`
+    : 'https://demotiles.maplibre.org/style.json';
 
   const map = new maplibregl.Map({
     container: 'map',
-    style: geoKeyInput.value
-      ? `https://maps.geoapify.com/v1/styles/osm-carto/style.json?apiKey=${encodeURIComponent(geoKeyInput.value)}`
-      : 'https://demotiles.maplibre.org/style.json',
+    style: styleUrl,
     center: [140.87, 38.26], // 仙台近辺
     zoom: 11
   });
@@ -127,10 +136,9 @@
       map.addLayer({ id: 'markers', type:'circle', source: sources.markers, paint: {'circle-radius': 5, 'circle-color': '#111'} });
     }
   };
-
   map.on('load', ensureSources);
 
-  const state = { items: [] }; // {id, address, minutes, lng, lat, isoFeature, circleFeature, color}
+  const state = { items: [] };
 
   const renderList = () => {
     const list = $("#points");
@@ -155,7 +163,6 @@
     const isoFc = { type:'FeatureCollection', features: state.items.map(it => it.isoFeature).filter(Boolean) };
     const cirFc = { type:'FeatureCollection', features: state.items.map(it => it.circleFeature).filter(Boolean) };
     const mkFc = { type:'FeatureCollection', features: state.items.map(it => ({ type:'Feature', properties:{}, geometry:{ type:'Point', coordinates:[it.lng, it.lat] } })) };
-
     if (map.getSource(sources.isochrones)) map.getSource(sources.isochrones).setData(isoFc);
     if (map.getSource(sources.circles)) map.getSource(sources.circles).setData(cirFc);
     if (map.getSource(sources.markers)) map.getSource(sources.markers).setData(mkFc);
@@ -189,13 +196,10 @@
   const removeItem = (id) => {
     const idx = state.items.findIndex(x=>x.id===id);
     if (idx>=0) state.items.splice(idx,1);
-    updateMapLayers();
-    computeIntersection();
-    renderList();
+    updateMapLayers(); computeIntersection(); renderList();
   };
 
-  const addBtn = $("#add");
-  addBtn.addEventListener('click', async ()=>{
+  $("#add").addEventListener('click', async ()=>{
     const address = $("#addr").value.trim();
     const minutes = Math.max(1, Math.min(30, parseInt($("#mins").value, 10) || 0));
     const orsKey = orsKeyInput.value.trim();
@@ -212,9 +216,8 @@
       const [lng, lat] = g.features[0].geometry.coordinates;
 
       const color = colors[state.items.length % colors.length];
+      let isoFeature = null, circleFeature = null;
 
-      let isoFeature = null;
-      let circleFeature = null;
       try {
         status('等時間到達圏（アイソクロン）計算中…');
         const body = { locations: [[lng, lat]], range: [minutes * 60], units: 'm', attributes: ['area'] };
@@ -235,17 +238,14 @@
           circle.properties = { color, address, minutes, fallback: 'circle' };
           circleFeature = circle;
           status('アイソクロン失敗→円で代用したよ。', 'warn');
-        } else {
-          throw e;
-        }
+        } else { throw e; }
       }
 
       if (!isoFeature && !circleFeature) throw new Error('計算に失敗。円代用ONにするかAPIキー/回数制限を確認してね。');
 
       const item = { id: crypto.randomUUID(), address, minutes, lng, lat, isoFeature, circleFeature, color };
       state.items.push(item);
-      updateMapLayers();
-      renderList();
+      updateMapLayers(); renderList();
       status('追加OK', 'ok');
     } catch (err) {
       console.error(err);
@@ -258,8 +258,7 @@
     state.items = [];
     updateMapLayers();
     if (map.getSource(sources.intersection)) map.getSource(sources.intersection).setData({ type:'FeatureCollection', features: [] });
-    renderList();
-    status('クリアしたよ。', 'muted');
+    renderList(); status('クリアしたよ。', 'muted');
   });
 
   $("#exportGeoJSON").addEventListener('click', ()=>{
@@ -268,9 +267,7 @@
     const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = 'intersection.geojson';
-    a.click();
+    a.href = url; a.download = 'intersection.geojson'; a.click();
     URL.revokeObjectURL(url);
   });
 
