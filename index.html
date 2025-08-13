@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>徒歩◯分 重ね合わせ（交差エリア特定ツール）</title>
+  <link href="https://unpkg.com/maplibre-gl@3.7.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic', sans-serif; }
+    #app { display: grid; grid-template-columns: 360px 1fr; height: 100%; }
+    #panel { border-right: 1px solid #eee; padding: 12px 12px 16px; overflow: auto; }
+    #map { width: 100%; height: 100%; }
+    h1 { font-size: 16px; margin: 0 0 8px; }
+    .row { display: grid; grid-template-columns: 1fr 88px 28px; gap: 6px; margin-bottom: 8px; }
+    input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+    input[type="number"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+    button { padding: 8px 10px; border: 1px solid #ccc; background: #fafafa; border-radius: 6px; cursor: pointer; }
+    button.primary { background: #111; color: #fff; border-color: #111; }
+    .muted { color: #666; font-size: 12px; }
+    .badge { display: inline-block; padding: 2px 6px; border-radius: 999px; background: #eee; font-size: 11px; margin-right: 4px; }
+    .small { font-size: 12px; }
+    .row-head { display: grid; grid-template-columns: 1fr 88px 28px; gap: 6px; font-size:12px; color:#666; margin: 4px 0; }
+    .toggle { display:flex; align-items:center; gap:8px; margin:8px 0 12px; }
+    .flex { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+    .list { margin-top: 10px; }
+    .list-item { display:flex; justify-content: space-between; gap:8px; border:1px solid #eee; padding:6px 8px; border-radius:6px; margin-bottom:6px; }
+    .list-item .meta { font-size:12px; color:#555; }
+    .foot { margin-top: 10px; }
+    .warn { color: #b45309; }
+    .ok { color: #0a7; }
+    .err { color: #b00; }
+    .help { font-size: 12px; color: #555; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#f1f1f1; border-radius:4px; padding:0 4px; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="panel">
+    <h1>徒歩◯分の重ね合わせ</h1>
+    <div class="muted">住所を最大10件、徒歩分数（1–30分）を入れて「追加」。重なりエリアを自動で計算するよ。</div>
+    <div style="margin:10px 0;">
+      <label class="small">ORS APIキー</label>
+      <input id="orsKey" type="text" placeholder="OpenRouteService API key（必須）" />
+    </div>
+    <div style="margin:6px 0;">
+      <label class="small">Geoapify タイル APIキー（任意・あると地図が綺麗）</label>
+      <input id="geoKey" type="text" placeholder="Geoapify API key（任意）" />
+    </div>
+    <div class="row-head"><div>住所</div><div>徒歩(分)</div><div></div></div>
+    <div class="row">
+      <input id="addr" type="text" placeholder="例）仙台市若林区荒井◯-◯  や  〇〇小学校" />
+      <input id="mins" type="number" min="1" max="30" value="10" />
+      <button id="add">＋</button>
+    </div>
+    <div class="toggle">
+      <input id="useCircle" type="checkbox" />
+      <label for="useCircle" class="small">API失敗時は円で代用（<span class="kbd">80m/分</span>）</label>
+    </div>
+    <div class="flex">
+      <button id="calc" class="primary">交差エリアを計算</button>
+      <button id="clearAll">クリア</button>
+      <button id="exportGeoJSON">交差GeoJSON書き出し</button>
+    </div>
+    <div class="list" id="points"></div>
+    <div class="foot help">
+      <div><span class="badge">ヒント</span>住所や施設名を入れて右の「＋」。右上のズーム/回転で調整可。</div>
+      <div style="margin-top:6px;"><span class="badge">注意</span>APIキーはブラウザのローカル保存。公開用途では鍵の扱いに注意して。</div>
+      <div style="margin-top:6px;"><span class="badge">規約</span>徒歩表示の換算は <span class="kbd">80m/分</span> を使用。</div>
+    </div>
+    <div id="status" class="muted" style="margin-top:8px;"></div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@3.7.0/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+<script>
+(function(){
+  const $ = (sel) => document.querySelector(sel);
+  const status = (msg, cls='muted') => { const el = $("#status"); el.className = cls; el.textContent = msg; }
+
+  const orsKeyInput = $("#orsKey");
+  const geoKeyInput = $("#geoKey");
+  orsKeyInput.value = localStorage.getItem('orsKey') || '';
+  geoKeyInput.value = localStorage.getItem('geoKey') || '';
+  orsKeyInput.addEventListener('change', ()=>localStorage.setItem('orsKey', orsKeyInput.value));
+  geoKeyInput.addEventListener('change', ()=>localStorage.setItem('geoKey', geoKeyInput.value));
+
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: geoKeyInput.value
+      ? `https://maps.geoapify.com/v1/styles/osm-carto/style.json?apiKey=${encodeURIComponent(geoKeyInput.value)}`
+      : 'https://demotiles.maplibre.org/style.json',
+    center: [140.87, 38.26], // 仙台近辺
+    zoom: 11
+  });
+  map.addControl(new maplibregl.NavigationControl(), 'top-right');
+  map.addControl(new maplibregl.ScaleControl({ maxWidth: 160, unit: 'metric'}), 'bottom-left');
+
+  const sources = {
+    isochrones: 'isochrones-src',
+    intersection: 'intersection-src',
+    circles: 'circles-src',
+    markers: 'markers-src'
+  };
+
+  const colors = ['#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02','#a6761d','#666666','#1f78b4','#b2df8a'];
+
+  const ensureSources = () => {
+    if (!map.getSource(sources.isochrones)) {
+      map.addSource(sources.isochrones, { type: 'geojson', data: { type:'FeatureCollection', features: [] }});
+      map.addLayer({ id: 'iso-fill', type:'fill', source: sources.isochrones, paint: {'fill-opacity': 0.18, 'fill-color': ['get','color']} });
+      map.addLayer({ id: 'iso-line', type:'line', source: sources.isochrones, paint: {'line-width': 1.2, 'line-color': ['get','color']} });
+    }
+    if (!map.getSource(sources.circles)) {
+      map.addSource(sources.circles, { type: 'geojson', data: { type:'FeatureCollection', features: [] }});
+      map.addLayer({ id: 'circle-fill', type:'fill', source: sources.circles, paint: {'fill-opacity': 0.10, 'fill-color': ['get','color']} });
+      map.addLayer({ id: 'circle-line', type:'line', source: sources.circles, paint: {'line-width': 1, 'line-color': ['get','color']} });
+    }
+    if (!map.getSource(sources.intersection)) {
+      map.addSource(sources.intersection, { type: 'geojson', data: { type:'FeatureCollection', features: [] }});
+      map.addLayer({ id: 'int-fill', type:'fill', source: sources.intersection, paint: {'fill-opacity': 0.35, 'fill-color': '#111'} });
+      map.addLayer({ id: 'int-line', type:'line', source: sources.intersection, paint: {'line-width': 2, 'line-color': '#111'} });
+    }
+    if (!map.getSource(sources.markers)) {
+      map.addSource(sources.markers, { type: 'geojson', data: { type:'FeatureCollection', features: [] }});
+      map.addLayer({ id: 'markers', type:'circle', source: sources.markers, paint: {'circle-radius': 5, 'circle-color': '#111'} });
+    }
+  };
+
+  map.on('load', ensureSources);
+
+  const state = { items: [] }; // {id, address, minutes, lng, lat, isoFeature, circleFeature, color}
+
+  const renderList = () => {
+    const list = $("#points");
+    list.innerHTML = '';
+    state.items.forEach((it, idx)=>{
+      const div = document.createElement('div');
+      div.className='list-item';
+      const left = document.createElement('div');
+      left.innerHTML = `<div><strong>${idx+1}. ${it.address}</strong></div><div class="meta">徒歩 ${it.minutes} 分 / [${it.lng.toFixed(5)}, ${it.lat.toFixed(5)}]</div>`;
+      const right = document.createElement('div');
+      const btn = document.createElement('button');
+      btn.textContent = '削除';
+      btn.onclick = ()=>removeItem(it.id);
+      right.appendChild(btn);
+      div.appendChild(left);
+      div.appendChild(right);
+      list.appendChild(div);
+    });
+  };
+
+  const updateMapLayers = () => {
+    const isoFc = { type:'FeatureCollection', features: state.items.map(it => it.isoFeature).filter(Boolean) };
+    const cirFc = { type:'FeatureCollection', features: state.items.map(it => it.circleFeature).filter(Boolean) };
+    const mkFc = { type:'FeatureCollection', features: state.items.map(it => ({ type:'Feature', properties:{}, geometry:{ type:'Point', coordinates:[it.lng, it.lat] } })) };
+
+    if (map.getSource(sources.isochrones)) map.getSource(sources.isochrones).setData(isoFc);
+    if (map.getSource(sources.circles)) map.getSource(sources.circles).setData(cirFc);
+    if (map.getSource(sources.markers)) map.getSource(sources.markers).setData(mkFc);
+  };
+
+  const computeIntersection = () => {
+    const polys = state.items.map(it => it.isoFeature || it.circleFeature).filter(Boolean);
+    if (polys.length === 0) {
+      if (map.getSource(sources.intersection)) map.getSource(sources.intersection).setData({ type:'FeatureCollection', features: [] });
+      return;
+    }
+    let acc = polys[0];
+    for (let i=1;i<polys.length;i++){
+      const inter = turf.intersect(acc, polys[i]);
+      if (!inter) { acc = null; break; }
+      acc = inter;
+    }
+    if (acc) {
+      const fc = { type:'FeatureCollection', features:[acc] };
+      map.getSource(sources.intersection).setData(fc);
+      try {
+        const bbox = turf.bbox(acc);
+        map.fitBounds(bbox, { padding: 40, animate: true });
+      } catch (e) {}
+    } else {
+      map.getSource(sources.intersection).setData({ type:'FeatureCollection', features: [] });
+      status('重なりがありません。徒歩分数や地点を見直してね。', 'warn');
+    }
+  };
+
+  const removeItem = (id) => {
+    const idx = state.items.findIndex(x=>x.id===id);
+    if (idx>=0) state.items.splice(idx,1);
+    updateMapLayers();
+    computeIntersection();
+    renderList();
+  };
+
+  const addBtn = $("#add");
+  addBtn.addEventListener('click', async ()=>{
+    const address = $("#addr").value.trim();
+    const minutes = Math.max(1, Math.min(30, parseInt($("#mins").value, 10) || 0));
+    const orsKey = orsKeyInput.value.trim();
+    if (!orsKey) { status('ORS APIキー入れて。', 'err'); return; }
+    if (!address) { status('住所を入れて。', 'err'); return; }
+    if (state.items.length >= 10) { status('追加は最大10件まで。', 'warn'); return; }
+
+    try {
+      status('ジオコーディング中…');
+      const geo = await fetch(`https://api.openrouteservice.org/geocode/search?api_key=${encodeURIComponent(orsKey)}&text=${encodeURIComponent(address)}&size=1&boundary.country=JP`);
+      if (!geo.ok) throw new Error('geocoding failed');
+      const g = await geo.json();
+      if (!g.features || !g.features.length) throw new Error('住所が見つからない');
+      const [lng, lat] = g.features[0].geometry.coordinates;
+
+      const color = colors[state.items.length % colors.length];
+
+      let isoFeature = null;
+      let circleFeature = null;
+      try {
+        status('等時間到達圏（アイソクロン）計算中…');
+        const body = { locations: [[lng, lat]], range: [minutes * 60], units: 'm', attributes: ['area'] };
+        const iso = await fetch(`https://api.openrouteservice.org/v2/isochrones/foot-walking`, {
+          method: 'POST',
+          headers: { 'Authorization': orsKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (!iso.ok) throw new Error('isochrone failed');
+        const j = await iso.json();
+        if (!j.features || !j.features.length) throw new Error('isochrone empty');
+        isoFeature = j.features[0];
+        isoFeature.properties = Object.assign({}, isoFeature.properties || {}, { color, address, minutes });
+      } catch(e) {
+        if ($("#useCircle").checked) {
+          const radiusMeters = minutes * 80;
+          const circle = turf.circle([lng, lat], radiusMeters, { steps: 90, units: 'meters' });
+          circle.properties = { color, address, minutes, fallback: 'circle' };
+          circleFeature = circle;
+          status('アイソクロン失敗→円で代用したよ。', 'warn');
+        } else {
+          throw e;
+        }
+      }
+
+      if (!isoFeature && !circleFeature) throw new Error('計算に失敗。円代用ONにするかAPIキー/回数制限を確認してね。');
+
+      const item = { id: crypto.randomUUID(), address, minutes, lng, lat, isoFeature, circleFeature, color };
+      state.items.push(item);
+      updateMapLayers();
+      renderList();
+      status('追加OK', 'ok');
+    } catch (err) {
+      console.error(err);
+      status('追加に失敗：' + err.message, 'err');
+    }
+  });
+
+  $("#calc").addEventListener('click', computeIntersection);
+  $("#clearAll").addEventListener('click', ()=>{
+    state.items = [];
+    updateMapLayers();
+    if (map.getSource(sources.intersection)) map.getSource(sources.intersection).setData({ type:'FeatureCollection', features: [] });
+    renderList();
+    status('クリアしたよ。', 'muted');
+  });
+
+  $("#exportGeoJSON").addEventListener('click', ()=>{
+    const data = map.getSource(sources.intersection) ? map.getSource(sources.intersection)._data : null;
+    if (!data || !data.features || !data.features.length) { status('交差エリアがありません。', 'warn'); return; }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'intersection.geojson';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+})();
+</script>
+</body>
+</html>
